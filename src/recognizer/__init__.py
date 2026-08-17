@@ -1,3 +1,4 @@
+import argparse
 import cv2
 from pathlib import Path
 from picamera2 import Picamera2
@@ -6,9 +7,26 @@ from recognizer.detector import HailoFaceDetector
 from recognizer.embedder import HailoEmbedder
 from recognizer.matcher import TargetMatcher
 from recognizer.config import DETECTOR_MODEL_PATH, EMBEDDER_MODEL_PATH, TARGET_PROFILE_PATH
+from recognizer.logging import get_logger, setup_logging
+
+logger = get_logger(__name__)
+
 
 def main():
-    print("Loading NPU models and target profile...")
+    parser = argparse.ArgumentParser(
+        prog="preview",
+        description="Run the live single-subject face recognition stream.",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug output (detailed detector logs).",
+    )
+    args = parser.parse_args()
+
+    setup_logging(debug=args.debug)
+
+    logger.info("Loading NPU models and target profile...")
     detector = HailoFaceDetector(hef_path=DETECTOR_MODEL_PATH, confidence_threshold=0.5)
     embedder = HailoEmbedder(hef_path=EMBEDDER_MODEL_PATH)
     matcher = TargetMatcher(profile_path=TARGET_PROFILE_PATH, threshold=0.45)
@@ -19,7 +37,7 @@ def main():
     )
     picam2.start()
 
-    print("Live recognition active. Press 'q' to quit.")
+    logger.info("Live recognition active. Press 'q' to quit.")
 
     try:
         while True:

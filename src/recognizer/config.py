@@ -20,3 +20,7 @@ TARGET_PROFILE_PATH = Path(
 RAW_TARGET_DIR = Path(
     os.getenv("RAW_TARGET_DIR", PROJECT_ROOT / "data" / "raw_target")
 )
+
+ACCEPTED_DIR = Path(
+    os.getenv("ACCEPTED_DIR", PROJECT_ROOT / "data" / "accepted")
+)

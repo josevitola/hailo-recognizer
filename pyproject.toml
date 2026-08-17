@@ -15,7 +15,7 @@ dependencies = [
 
 [project.scripts]
 preview = "recognizer:main"
-enroll = "scripts.enroll:enroll_target"
+enroll = "scripts.enroll:main"
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]

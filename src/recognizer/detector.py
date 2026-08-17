@@ -13,6 +13,9 @@ from hailo_platform import (
 )
 
 from recognizer.device import get_vdevice
+from recognizer.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class HailoFaceDetector:
@@ -92,7 +95,7 @@ class HailoFaceDetector:
 
     def detect(self, image_rgb: np.ndarray) -> list[tuple[int, int, int, int, float]]:
         orig_h, orig_w, _ = image_rgb.shape
-        print(f"\n[DEBUG detector] Input Image Shape: {orig_w}x{orig_h}")
+        logger.debug("Input Image Shape: %dx%d", orig_w, orig_h)
 
         resized_frame = cv2.resize(
             image_rgb, (self.input_width, self.input_height)
@@ -111,15 +114,20 @@ class HailoFaceDetector:
             with self.network_group.activate(self.network_group_params):
                 raw_results = infer_pipeline.infer(input_data)
 
-        print("[DEBUG detector] --- Raw Tensor Output Summary ---")
+        logger.debug("--- Raw Tensor Output Summary ---")
         outputs_by_stride = {}
         for name, tensor in raw_results.items():
             _, h, w, c = tensor.shape
             stride = self.input_height // h
             min_val, max_val, mean_val = tensor.min(), tensor.max(), tensor.mean()
-            print(
-                f"  - Key: '{name}' | Shape: {tensor.shape} | Stride: {stride} | "
-                f"Range: [{min_val:.4f}, {max_val:.4f}] | Mean: {mean_val:.4f}"
+            logger.debug(
+                "  - Key: '%s' | Shape: %s | Stride: %s | Range: [%.4f, %.4f] | Mean: %.4f",
+                name,
+                tensor.shape,
+                stride,
+                min_val,
+                max_val,
+                mean_val,
             )
 
             if stride not in outputs_by_stride:
@@ -133,15 +141,15 @@ class HailoFaceDetector:
         all_boxes = []
         all_scores = []
 
-        print("[DEBUG detector] --- Stride Decoding Summary ---")
+        logger.debug("--- Stride Decoding Summary ---")
         for stride in self.strides:
             if stride not in outputs_by_stride:
-                print(f"  - Stride {stride}: MISSING in output tensors")
+                logger.debug("  - Stride %s: MISSING in output tensors", stride)
                 continue
 
             stride_data = outputs_by_stride[stride]
             if "score" not in stride_data or "bbox" not in stride_data:
-                print(f"  - Stride {stride}: Missing score or bbox tensor")
+                logger.debug("  - Stride %s: Missing score or bbox tensor", stride)
                 continue
 
             raw_scores = stride_data["score"].flatten()
@@ -150,10 +158,10 @@ class HailoFaceDetector:
             top5_raw = np.sort(raw_scores)[-5:][::-1]
             top5_sig = np.sort(sig_scores)[-5:][::-1]
 
-            print(f"  - Stride {stride}:")
-            print(f"      Top 5 Raw Scores:      {np.round(top5_raw, 4)}")
-            print(f"      Top 5 Sigmoid Scores:  {np.round(top5_sig, 4)}")
-            print(f"      Confidence Threshold:  {self.confidence_threshold}")
+            logger.debug("  - Stride %s:", stride)
+            logger.debug("      Top 5 Raw Scores:      %s", np.round(top5_raw, 4))
+            logger.debug("      Top 5 Sigmoid Scores:  %s", np.round(top5_sig, 4))
+            logger.debug("      Confidence Threshold:  %s", self.confidence_threshold)
 
             bbox_outputs = stride_data["bbox"]
             anchors = self.anchors_by_stride[stride]
@@ -166,8 +174,8 @@ class HailoFaceDetector:
                 anchors, bbox_outputs, stride, raw_scores
             )
 
-            print(f"      Candidates via Sigmoid: {len(boxes_sig)}")
-            print(f"      Candidates via Raw:     {len(boxes_raw)}")
+            logger.debug("      Candidates via Sigmoid: %s", len(boxes_sig))
+            logger.debug("      Candidates via Raw:     %s", len(boxes_raw))
 
             # Prefer sigmoid if candidates exist, otherwise try raw
             if len(boxes_sig) > 0:
@@ -178,7 +186,7 @@ class HailoFaceDetector:
                 all_scores.append(scores_raw)
 
         if not all_boxes:
-            print("[DEBUG detector] Result: ZERO candidates passed confidence threshold.")
+            logger.debug("Result: ZERO candidates passed confidence threshold.")
             return []
 
         cat_boxes = np.vstack(all_boxes)
@@ -201,8 +209,8 @@ class HailoFaceDetector:
             self.nms_threshold,
         )
 
-        print(f"[DEBUG detector] Total candidates before NMS: {len(cat_boxes)}")
-        print(f"[DEBUG detector] Total surviving after NMS:  {len(indices)}")
+        logger.debug("Total candidates before NMS: %s", len(cat_boxes))
+        logger.debug("Total surviving after NMS:  %s", len(indices))
 
         if len(indices) == 0:
             return []
