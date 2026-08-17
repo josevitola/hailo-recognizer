@@ -11,3 +11,5 @@ wheels/
 
 # Models
 models/*.hef
+data/*
+*.log

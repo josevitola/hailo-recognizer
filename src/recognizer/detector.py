@@ -1,24 +1,34 @@
+from pathlib import Path
 import cv2
 import numpy as np
-from pathlib import Path
 from hailo_platform import (
     HEF,
-    VDevice,
+    ConfigureParams,
+    FormatType,
     HailoStreamInterface,
     InferVStreams,
-    ConfigureParams,
     InputVStreamParams,
     OutputVStreamParams,
-    FormatType,
+    VDevice,
 )
+
+from recognizer.device import get_vdevice
 
 
 class HailoFaceDetector:
-    def __init__(self, hef_path: str | Path, confidence_threshold: float = 0.5, nms_threshold: float = 0.4):
+    def __init__(
+        self,
+        hef_path: str | Path,
+        confidence_threshold: float = 0.5,
+        nms_threshold: float = 0.4,
+        target: VDevice | None = None,
+    ):
+        self.hef = HEF(str(hef_path))
         self.confidence_threshold = confidence_threshold
         self.nms_threshold = nms_threshold
-        self.hef = HEF(str(hef_path))
-        self.target = VDevice()
+
+        # Use shared VDevice singleton if none passed explicitly
+        self.target = target or get_vdevice()
 
         configure_params = ConfigureParams.create_from_hef(
             hef=self.hef, interface=HailoStreamInterface.PCIe
@@ -37,26 +47,54 @@ class HailoFaceDetector:
             self.network_group, format_type=FormatType.FLOAT32
         )
 
-        # Pre-generate feature strides and anchor grids for SCRFD
         self.strides = [8, 16, 32]
-        self.num_anchors_per_stride = 2
-        self.anchors = self._generate_anchors()
+        self.anchors_by_stride = self._generate_anchors()
 
     def _generate_anchors(self) -> dict[int, np.ndarray]:
         anchors = {}
         for stride in self.strides:
-            feat_h = self.input_height // stride
-            feat_w = self.input_width // stride
-            grid_y, grid_x = np.mgrid[:feat_h, :feat_w]
-            grid = np.stack((grid_x, grid_y), axis=-1).astype(np.float32) * stride
-            # Duplicate for 2 anchors per stride cell
-            anchor_centers = np.repeat(grid[:, :, np.newaxis, :], self.num_anchors_per_stride, axis=2)
-            anchors[stride] = anchor_centers.reshape(-1, 2)
+            grid_h = self.input_height // stride
+            grid_w = self.input_width // stride
+
+            grid_x, grid_y = np.meshgrid(np.arange(grid_w), np.arange(grid_h))
+            anchor_x = (grid_x.flatten() + 0.5) * stride
+            anchor_y = (grid_y.flatten() + 0.5) * stride
+
+            # Shape: (N, 2) where N = grid_h * grid_w (2 anchors per center point in SCRFD)
+            centers = np.stack([anchor_x, anchor_y], axis=-1)
+            anchors[stride] = np.repeat(centers, 2, axis=0)
+
         return anchors
 
-    def detect(self, frame_rgb: np.ndarray) -> list[tuple[int, int, int, int, float]]:
-        orig_h, orig_w, _ = frame_rgb.shape
-        resized_frame = cv2.resize(frame_rgb, (self.input_width, self.input_height))
+    def _decode_boxes(
+        self,
+        anchors: np.ndarray,
+        bbox_outputs: np.ndarray,
+        stride: int,
+        scores: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        # Filter candidate anchor locations by confidence threshold
+        mask = scores >= self.confidence_threshold
+        if not np.any(mask):
+            return np.empty((0, 4)), np.empty((0,))
+
+        filtered_anchors = anchors[mask]
+        filtered_scores = scores[mask]
+        deltas = bbox_outputs.reshape(-1, 4)[mask] * stride
+
+        x1 = filtered_anchors[:, 0] - deltas[:, 0]
+        y1 = filtered_anchors[:, 1] - deltas[:, 1]
+        x2 = filtered_anchors[:, 0] + deltas[:, 2]
+        y2 = filtered_anchors[:, 1] + deltas[:, 3]
+
+        boxes = np.stack([x1, y1, x2, y2], axis=-1)
+        return boxes, filtered_scores
+
+    def detect(self, image_rgb: np.ndarray) -> list[tuple[int, int, int, int, float]]:
+        orig_h, orig_w, _ = image_rgb.shape
+        resized_frame = cv2.resize(
+            image_rgb, (self.input_width, self.input_height)
+        )
         input_data = {
             self.hef.get_input_vstream_infos()[0].name: np.expand_dims(
                 resized_frame, axis=0
@@ -69,77 +107,65 @@ class HailoFaceDetector:
             self.output_vstream_params,
         ) as infer_pipeline:
             with self.network_group.activate(self.network_group_params):
-                results = infer_pipeline.infer(input_data)
+                raw_results = infer_pipeline.infer(input_data)
 
-        boxes, scores = [], []
+        all_boxes = []
+        all_scores = []
 
-        # Parse score and bbox tensors across feature strides
+        # Parse feature map tensors per stride
         for stride in self.strides:
-            # Find output tensors matching current stride resolution
-            feat_h, feat_w = self.input_height // stride, self.input_width // stride
-            score_tensor = None
-            bbox_tensor = None
+            score_key = f"scrfd_2.5g_h8l/score_s{stride}"
+            bbox_key = f"scrfd_2.5g_h8l/bbox_s{stride}"
 
-            for name, tensor in results.items():
-                if tensor.shape[1:3] == (feat_h, feat_w):
-                    if tensor.shape[-1] in (1, 2):  # Score map
-                        score_tensor = tensor[0]
-                    elif tensor.shape[-1] in (4, 8):  # Bbox distance map
-                        bbox_tensor = tensor[0]
+            print("Raw output keys:", list(raw_results.keys()))
 
-            if score_tensor is None or bbox_tensor is None:
+            if score_key not in raw_results or bbox_key not in raw_results:
                 continue
 
-            # Reshape raw maps into lists of candidate detections
-            stride_scores = score_tensor.reshape(-1)
-            stride_bboxes = bbox_tensor.reshape(-1, 4) * stride
-            stride_anchors = self.anchors[stride]
+            scores = raw_results[score_key].flatten()
+            bbox_outputs = raw_results[bbox_key]
+            anchors = self.anchors_by_stride[stride]
 
-            mask = stride_scores >= self.confidence_threshold
-            if not np.any(mask):
-                continue
+            boxes, filtered_scores = self._decode_boxes(
+                anchors, bbox_outputs, stride, scores
+            )
+            if len(boxes) > 0:
+                all_boxes.append(boxes)
+                all_scores.append(filtered_scores)
 
-            valid_scores = stride_scores[mask]
-            valid_deltas = stride_bboxes[mask]
-            valid_anchors = stride_anchors[mask]
-
-            # Decode distance offsets (left, top, right, bottom) into (x1, y1, x2, y2)
-            x1 = valid_anchors[:, 0] - valid_deltas[:, 0]
-            y1 = valid_anchors[:, 1] - valid_deltas[:, 1]
-            x2 = valid_anchors[:, 0] + valid_deltas[:, 2]
-            y2 = valid_anchors[:, 1] + valid_deltas[:, 3]
-
-            boxes.append(np.stack([x1, y1, x2 - x1, y2 - y1], axis=-1))
-            scores.append(valid_scores)
-
-        if not boxes:
+        if not all_boxes:
             return []
 
-        all_boxes = np.vstack(boxes)
-        all_scores = np.concatenate(scores)
+        cat_boxes = np.vstack(all_boxes)
+        cat_scores = np.concatenate(all_scores)
 
-        # Apply OpenCV NMS to filter overlapping bounding boxes
+        # Rescale normalized 640x640 coordinates back to original image aspect ratio
+        scale_x = orig_w / self.input_width
+        scale_y = orig_h / self.input_height
+
+        cat_boxes[:, [0, 2]] *= scale_x
+        cat_boxes[:, [1, 3]] *= scale_y
+
+        # OpenCV Non-Maximum Suppression (NMS)
+        boxes_xywh = cat_boxes.copy()
+        boxes_xywh[:, 2] -= boxes_xywh[:, 0]  # Width
+        boxes_xywh[:, 3] -= boxes_xywh[:, 1]  # Height
+
         indices = cv2.dnn.NMSBoxes(
-            bboxes=all_boxes.tolist(),
-            scores=all_scores.tolist(),
-            score_threshold=self.confidence_threshold,
-            nms_threshold=self.nms_threshold,
+            boxes_xywh.tolist(),
+            cat_scores.tolist(),
+            self.confidence_threshold,
+            self.nms_threshold,
         )
 
-        detections = []
-        if len(indices) > 0:
-            scale_x = orig_w / self.input_width
-            scale_y = orig_h / self.input_height
+        if len(indices) == 0:
+            return []
 
-            for idx in indices.flatten():
-                x, y, w, h = all_boxes[idx]
-                score = float(all_scores[idx])
+        indices = indices.flatten()
+        results = []
+        for idx in indices:
+            x1, y1, x2, y2 = cat_boxes[idx].astype(int)
+            score = float(cat_scores[idx])
+            results.append((x1, y1, x2, y2, score))
 
-                x1 = int(x * scale_x)
-                y1 = int(y * scale_y)
-                x2 = int((x + w) * scale_x)
-                y2 = int((y + h) * scale_y)
-
-                detections.append((x1, y1, x2, y2, score))
-
-        return detections
+        return results

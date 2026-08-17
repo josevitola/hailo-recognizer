@@ -10,10 +10,12 @@ requires-python = ">=3.13"
 dependencies = [
     "matplotlib>=3.11.1",
     "picamera2>=0.3.37",
+    "scikit-learn>=1.9.0",
 ]
 
 [project.scripts]
-recognizer = "recognizer:main"
+preview = "recognizer:main"
+enroll = "scripts.enroll:enroll_target"
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
