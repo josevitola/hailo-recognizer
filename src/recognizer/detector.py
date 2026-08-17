@@ -27,7 +27,6 @@ class HailoFaceDetector:
         self.confidence_threshold = confidence_threshold
         self.nms_threshold = nms_threshold
 
-        # Use shared VDevice singleton if none passed explicitly
         self.target = target or get_vdevice()
 
         configure_params = ConfigureParams.create_from_hef(
@@ -60,11 +59,13 @@ class HailoFaceDetector:
             anchor_x = (grid_x.flatten() + 0.5) * stride
             anchor_y = (grid_y.flatten() + 0.5) * stride
 
-            # Shape: (N, 2) where N = grid_h * grid_w (2 anchors per center point in SCRFD)
             centers = np.stack([anchor_x, anchor_y], axis=-1)
             anchors[stride] = np.repeat(centers, 2, axis=0)
 
         return anchors
+
+    def _sigmoid(self, x: np.ndarray) -> np.ndarray:
+        return 1.0 / (1.0 + np.exp(-x))
 
     def _decode_boxes(
         self,
@@ -73,7 +74,6 @@ class HailoFaceDetector:
         stride: int,
         scores: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
-        # Filter candidate anchor locations by confidence threshold
         mask = scores >= self.confidence_threshold
         if not np.any(mask):
             return np.empty((0, 4)), np.empty((0,))
@@ -92,6 +92,8 @@ class HailoFaceDetector:
 
     def detect(self, image_rgb: np.ndarray) -> list[tuple[int, int, int, int, float]]:
         orig_h, orig_w, _ = image_rgb.shape
+        print(f"\n[DEBUG detector] Input Image Shape: {orig_w}x{orig_h}")
+
         resized_frame = cv2.resize(
             image_rgb, (self.input_width, self.input_height)
         )
@@ -109,47 +111,88 @@ class HailoFaceDetector:
             with self.network_group.activate(self.network_group_params):
                 raw_results = infer_pipeline.infer(input_data)
 
+        print("[DEBUG detector] --- Raw Tensor Output Summary ---")
+        outputs_by_stride = {}
+        for name, tensor in raw_results.items():
+            _, h, w, c = tensor.shape
+            stride = self.input_height // h
+            min_val, max_val, mean_val = tensor.min(), tensor.max(), tensor.mean()
+            print(
+                f"  - Key: '{name}' | Shape: {tensor.shape} | Stride: {stride} | "
+                f"Range: [{min_val:.4f}, {max_val:.4f}] | Mean: {mean_val:.4f}"
+            )
+
+            if stride not in outputs_by_stride:
+                outputs_by_stride[stride] = {}
+
+            if c <= 2:
+                outputs_by_stride[stride]["score"] = tensor
+            elif c == 8:
+                outputs_by_stride[stride]["bbox"] = tensor
+
         all_boxes = []
         all_scores = []
 
-        # Parse feature map tensors per stride
+        print("[DEBUG detector] --- Stride Decoding Summary ---")
         for stride in self.strides:
-            score_key = f"scrfd_2.5g_h8l/score_s{stride}"
-            bbox_key = f"scrfd_2.5g_h8l/bbox_s{stride}"
-
-            print("Raw output keys:", list(raw_results.keys()))
-
-            if score_key not in raw_results or bbox_key not in raw_results:
+            if stride not in outputs_by_stride:
+                print(f"  - Stride {stride}: MISSING in output tensors")
                 continue
 
-            scores = raw_results[score_key].flatten()
-            bbox_outputs = raw_results[bbox_key]
+            stride_data = outputs_by_stride[stride]
+            if "score" not in stride_data or "bbox" not in stride_data:
+                print(f"  - Stride {stride}: Missing score or bbox tensor")
+                continue
+
+            raw_scores = stride_data["score"].flatten()
+            sig_scores = self._sigmoid(raw_scores)
+
+            top5_raw = np.sort(raw_scores)[-5:][::-1]
+            top5_sig = np.sort(sig_scores)[-5:][::-1]
+
+            print(f"  - Stride {stride}:")
+            print(f"      Top 5 Raw Scores:      {np.round(top5_raw, 4)}")
+            print(f"      Top 5 Sigmoid Scores:  {np.round(top5_sig, 4)}")
+            print(f"      Confidence Threshold:  {self.confidence_threshold}")
+
+            bbox_outputs = stride_data["bbox"]
             anchors = self.anchors_by_stride[stride]
 
-            boxes, filtered_scores = self._decode_boxes(
-                anchors, bbox_outputs, stride, scores
+            # Try both raw and sigmoid scores for candidates
+            boxes_sig, scores_sig = self._decode_boxes(
+                anchors, bbox_outputs, stride, sig_scores
             )
-            if len(boxes) > 0:
-                all_boxes.append(boxes)
-                all_scores.append(filtered_scores)
+            boxes_raw, scores_raw = self._decode_boxes(
+                anchors, bbox_outputs, stride, raw_scores
+            )
+
+            print(f"      Candidates via Sigmoid: {len(boxes_sig)}")
+            print(f"      Candidates via Raw:     {len(boxes_raw)}")
+
+            # Prefer sigmoid if candidates exist, otherwise try raw
+            if len(boxes_sig) > 0:
+                all_boxes.append(boxes_sig)
+                all_scores.append(scores_sig)
+            elif len(boxes_raw) > 0:
+                all_boxes.append(boxes_raw)
+                all_scores.append(scores_raw)
 
         if not all_boxes:
+            print("[DEBUG detector] Result: ZERO candidates passed confidence threshold.")
             return []
 
         cat_boxes = np.vstack(all_boxes)
         cat_scores = np.concatenate(all_scores)
 
-        # Rescale normalized 640x640 coordinates back to original image aspect ratio
         scale_x = orig_w / self.input_width
         scale_y = orig_h / self.input_height
 
         cat_boxes[:, [0, 2]] *= scale_x
         cat_boxes[:, [1, 3]] *= scale_y
 
-        # OpenCV Non-Maximum Suppression (NMS)
         boxes_xywh = cat_boxes.copy()
-        boxes_xywh[:, 2] -= boxes_xywh[:, 0]  # Width
-        boxes_xywh[:, 3] -= boxes_xywh[:, 1]  # Height
+        boxes_xywh[:, 2] -= boxes_xywh[:, 0]
+        boxes_xywh[:, 3] -= boxes_xywh[:, 1]
 
         indices = cv2.dnn.NMSBoxes(
             boxes_xywh.tolist(),
@@ -157,6 +200,9 @@ class HailoFaceDetector:
             self.confidence_threshold,
             self.nms_threshold,
         )
+
+        print(f"[DEBUG detector] Total candidates before NMS: {len(cat_boxes)}")
+        print(f"[DEBUG detector] Total surviving after NMS:  {len(indices)}")
 
         if len(indices) == 0:
             return []
