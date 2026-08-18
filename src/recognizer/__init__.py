@@ -6,7 +6,7 @@ from picamera2 import Picamera2
 from recognizer.detector import HailoFaceDetector
 from recognizer.embedder import HailoEmbedder
 from recognizer.matcher import TargetMatcher
-from recognizer.config import DETECTOR_MODEL_PATH, EMBEDDER_MODEL_PATH, TARGET_PROFILE_PATH
+from recognizer.config import DETECTOR_MODEL_PATH, EMBEDDER_MODEL_PATH, TARGET_PROFILE_PATH, DETECTOR_THRESHOLD, MATCHER_THRESHOLD
 from recognizer.logging import get_logger, setup_logging
 
 logger = get_logger(__name__)
@@ -27,9 +27,9 @@ def main():
     setup_logging(debug=args.debug)
 
     logger.info("Loading NPU models and target profile...")
-    detector = HailoFaceDetector(hef_path=DETECTOR_MODEL_PATH, confidence_threshold=0.5)
+    detector = HailoFaceDetector(hef_path=DETECTOR_MODEL_PATH, confidence_threshold=DETECTOR_THRESHOLD)
     embedder = HailoEmbedder(hef_path=EMBEDDER_MODEL_PATH)
-    matcher = TargetMatcher(profile_path=TARGET_PROFILE_PATH, threshold=0.45)
+    matcher = TargetMatcher(profile_path=TARGET_PROFILE_PATH, threshold=MATCHER_THRESHOLD)
 
     picam2 = Picamera2()
     picam2.configure(
@@ -47,39 +47,36 @@ def main():
             # 1. Detect faces in frame
             detections = detector.detect(frame_rgb)
 
-            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-
             for x1, y1, x2, y2, det_score in detections:
-                # Clamp boundaries
-                cx1, cy1 = max(0, x1), max(0, y1)
-                cx2, cy2 = min(w, x2), min(h, y2)
-
-                face_crop = frame_rgb[cy1:cy2, cx1:cx2]
-                if face_crop.size == 0:
+            # 1. Clamp coordinates
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
+                
+                crop = frame_rgb[y1:y2, x1:x2]
+                if crop.size == 0 or crop.shape[0] < 20 or crop.shape[1] < 20:
                     continue
 
-                # 2. Extract 512-D embedding via ArcFace
-                live_embedding = embedder.extract_embedding(face_crop)
+                # 2. Extract embedding and check match
+                embedding = embedder.extract_embedding(crop)
+                is_match, similarity = matcher.match(embedding)
 
-                # 3. Match against loaded target profile
-                is_target, similarity = matcher.match(live_embedding)
+                # 3. ONLY DRAW IF MATCHED TO TARGET
+                if is_match:
+                    label = f"Target ({similarity:.2f})"
+                    color = (0, 255, 0)  # Green
 
-                # 4. Render results (Green = Target, Gray = Unknown)
-                color = (0, 255, 0) if is_target else (128, 128, 128)
-                label = f"Target ({similarity:.2f})" if is_target else f"Unknown ({similarity:.2f})"
+                    cv2.rectangle(frame_rgb, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(
+                        frame_rgb,
+                        label,
+                        (x1, max(y1 - 10, 20)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        color,
+                        2,
+                    )
 
-                cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(
-                    frame_bgr,
-                    label,
-                    (x1, max(20, y1 - 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    color,
-                    2,
-                )
-
-            cv2.imshow("Raspberry Pi 5 - Target Face Recognition", frame_bgr)
+            cv2.imshow("Raspberry Pi 5 - Target Face Recognition", frame_rgb)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
 

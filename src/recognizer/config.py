@@ -24,3 +24,6 @@ RAW_TARGET_DIR = Path(
 ACCEPTED_DIR = Path(
     os.getenv("ACCEPTED_DIR", PROJECT_ROOT / "data" / "accepted")
 )
+
+DETECTOR_THRESHOLD = float(os.getenv("DETECTOR_THRESHOLD", 0.5))
+MATCHER_THRESHOLD = float(os.getenv("MATCHER_THRESHOLD", 0.55))
