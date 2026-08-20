@@ -76,20 +76,34 @@ def main():
                 is_match, similarity = matcher.match(embedding)
 
                 # 3. ONLY DRAW IF MATCHED TO TARGET
-                if is_match:
-                    label = f"Target ({similarity:.2f})"
-                    color = (0, 255, 0)  # Green
+                # if is_match:
+                #     label = f"Det: {det_score:.2f}, Match: {similarity:.2f}"
+                #     color = (0, 255, 0)  # Green
 
-                    cv2.rectangle(frame_rgb, (x1, y1), (x2, y2), color, 2)
-                    cv2.putText(
-                        frame_rgb,
-                        label,
-                        (x1, max(y1 - 10, 20)),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        color,
-                        2,
-                    )
+                #     cv2.rectangle(frame_rgb, (x1, y1), (x2, y2), color, 2)
+                #     cv2.putText(
+                #         frame_rgb,
+                #         label,
+                #         (x1, max(y1 - 10, 20)),
+                #         cv2.FONT_HERSHEY_SIMPLEX,
+                #         0.6,
+                #         color,
+                #         2,
+                #     )
+
+                label = f"Det: {det_score:.2f}, Match: {similarity:.2f}"
+                color = (0, 255, 0) if is_match else (0, 0, 255)  # Green if match, Red if not
+
+                cv2.rectangle(frame_rgb, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(
+                    frame_rgb,
+                    label,
+                    (x1, max(y1 - 10, 20)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    color,
+                    2,
+                )
 
             t_draw = time.perf_counter()
 

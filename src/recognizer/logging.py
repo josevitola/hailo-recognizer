@@ -25,6 +25,10 @@ def setup_logging(debug: bool = False) -> None:
 
 def get_logger(name: str | None = None) -> logging.Logger:
     """Return a child logger of the 'recognizer' package logger."""
+    logging.basicConfig(filename="app.log",
+                        filemode='a',
+                        format='%(asctime)s,%(msecs)03d %(name)s %(levelname)s %(message)s',
+                        datefmt='%Y-%m-%d %H:%M:%S')
     if name:
         return logging.getLogger(f"{LOGGER_NAME}.{name}")
     return logging.getLogger(LOGGER_NAME)
