@@ -81,6 +81,8 @@ def main():
                 break
 
     finally:
+        detector.close()
+        embedder.close()
         picam2.stop()
         cv2.destroyAllWindows()
 

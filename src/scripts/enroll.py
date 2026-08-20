@@ -64,95 +64,99 @@ def enroll_target() -> None:
     detector = HailoFaceDetector(hef_path=DETECTOR_MODEL_PATH, confidence_threshold=0.3)
     embedder = HailoEmbedder(hef_path=EMBEDDER_MODEL_PATH)
 
-    if not RAW_TARGET_DIR.exists():
-        logger.error("Target directory '%s' does not exist.", RAW_TARGET_DIR)
-        return
+    try:
+        if not RAW_TARGET_DIR.exists():
+            logger.error("Target directory '%s' does not exist.", RAW_TARGET_DIR)
+            return
 
-    supported_extensions = {".jpg", ".jpeg", ".png"}
-    image_paths = sorted(
-        p
-        for p in RAW_TARGET_DIR.iterdir()
-        if p.is_file() and p.suffix.lower() in supported_extensions
-    )
-
-    if not image_paths:
-        logger.error("No valid image files found in '%s'.", RAW_TARGET_DIR)
-        return
-
-    logger.info(
-        "Processing %d target images from '%s'...", len(image_paths), RAW_TARGET_DIR
-    )
-
-    embeddings = []
-    valid_count = 0
-
-    for img_path in image_paths:
-        logger.info("==================== Processing %s ====================", img_path.name)
-        try:
-            image_rgb = load_image_rgb(img_path)
-        except Exception as e:
-            logger.error("Failed to load %s: %s", img_path.name, e)
-            continue
-
-        detections = detector.detect(image_rgb)
-
-        if not detections:
-            logger.debug("[SKIPPED] %s: No face detected by detector.", img_path.name)
-            continue
-
-        best_det = max(detections, key=lambda d: d[4])
-        x1, y1, x2, y2, score = best_det
-        logger.debug(
-            "Best detection: BBox=[%d, %d, %d, %d] | Confidence=%.4f",
-            x1,
-            y1,
-            x2,
-            y2,
-            score,
+        supported_extensions = {".jpg", ".jpeg", ".png"}
+        image_paths = sorted(
+            p
+            for p in RAW_TARGET_DIR.iterdir()
+            if p.is_file() and p.suffix.lower() in supported_extensions
         )
 
-        h_img, w_img, _ = image_rgb.shape
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w_img, x2), min(h_img, y2)
+        if not image_paths:
+            logger.error("No valid image files found in '%s'.", RAW_TARGET_DIR)
+            return
 
-        crop = image_rgb[y1:y2, x1:x2]
+        logger.info(
+            "Processing %d target images from '%s'...", len(image_paths), RAW_TARGET_DIR
+        )
 
-        if not passes_quality_checks(crop):
-            logger.debug("[SKIPPED] %s: Crop failed quality or resolution checks.", img_path.name)
-            continue
+        embeddings = []
+        valid_count = 0
 
-        embedding = embedder.extract_embedding(crop)
-        embeddings.append(embedding)
-        valid_count += 1
+        for img_path in image_paths:
+            logger.info("==================== Processing %s ====================", img_path.name)
+            try:
+                image_rgb = load_image_rgb(img_path)
+            except Exception as e:
+                logger.error("Failed to load %s: %s", img_path.name, e)
+                continue
 
-        # Save the accepted face crop to data/accepted/
-        ACCEPTED_DIR.mkdir(parents=True, exist_ok=True)
-        accepted_path = ACCEPTED_DIR / img_path.name
-        cv2.imwrite(str(accepted_path), cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
+            detections = detector.detect(image_rgb)
 
-        logger.info("[ACCEPTED] %s (Confidence: %.2f)", img_path.name, score)
-        logger.debug("Saved accepted crop to: %s", accepted_path)
+            if not detections:
+                logger.debug("[SKIPPED] %s: No face detected by detector.", img_path.name)
+                continue
 
-    if not embeddings:
-        logger.error("Enrollment failed: No image crops passed detection and quality checks.")
-        return
+            best_det = max(detections, key=lambda d: d[4])
+            x1, y1, x2, y2, score = best_det
+            logger.debug(
+                "Best detection: BBox=[%d, %d, %d, %d] | Confidence=%.4f",
+                x1,
+                y1,
+                x2,
+                y2,
+                score,
+            )
 
-    embeddings_matrix = np.vstack(embeddings)
-    centroid = np.mean(embeddings_matrix, axis=0)
+            h_img, w_img, _ = image_rgb.shape
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w_img, x2), min(h_img, y2)
 
-    norm = np.linalg.norm(centroid)
-    if norm > 0:
-        centroid = centroid / norm
+            crop = image_rgb[y1:y2, x1:x2]
 
-    TARGET_PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    np.save(TARGET_PROFILE_PATH, centroid)
+            if not passes_quality_checks(crop):
+                logger.debug("[SKIPPED] %s: Crop failed quality or resolution checks.", img_path.name)
+                continue
 
-    logger.info(
-        "Successfully enrolled target using %d/%d images.",
-        valid_count,
-        len(image_paths),
-    )
-    logger.info("Target profile vector saved to: %s", TARGET_PROFILE_PATH)
+            embedding = embedder.extract_embedding(crop)
+            embeddings.append(embedding)
+            valid_count += 1
+
+            # Save the accepted face crop to data/accepted/
+            ACCEPTED_DIR.mkdir(parents=True, exist_ok=True)
+            accepted_path = ACCEPTED_DIR / img_path.name
+            cv2.imwrite(str(accepted_path), cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
+
+            logger.info("[ACCEPTED] %s (Confidence: %.2f)", img_path.name, score)
+            logger.debug("Saved accepted crop to: %s", accepted_path)
+
+        if not embeddings:
+            logger.error("Enrollment failed: No image crops passed detection and quality checks.")
+            return
+
+        embeddings_matrix = np.vstack(embeddings)
+        centroid = np.mean(embeddings_matrix, axis=0)
+
+        norm = np.linalg.norm(centroid)
+        if norm > 0:
+            centroid = centroid / norm
+
+        TARGET_PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        np.save(TARGET_PROFILE_PATH, centroid)
+
+        logger.info(
+            "Successfully enrolled target using %d/%d images.",
+            valid_count,
+            len(image_paths),
+        )
+        logger.info("Target profile vector saved to: %s", TARGET_PROFILE_PATH)
+    finally:
+        detector.close()
+        embedder.close()
 
 
 def main() -> None:

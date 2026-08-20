@@ -1,24 +1,15 @@
 from pathlib import Path
 import cv2
 import numpy as np
-from hailo_platform import (
-    HEF,
-    ConfigureParams,
-    FormatType,
-    HailoStreamInterface,
-    InferVStreams,
-    InputVStreamParams,
-    OutputVStreamParams,
-    VDevice,
-)
+from hailo_platform import VDevice
 
-from recognizer.device import get_vdevice
+from recognizer.base import HailoModelBase
 from recognizer.logging import get_logger
 
 logger = get_logger(__name__)
 
 
-class HailoFaceDetector:
+class HailoFaceDetector(HailoModelBase):
     def __init__(
         self,
         hef_path: str | Path,
@@ -26,29 +17,9 @@ class HailoFaceDetector:
         nms_threshold: float = 0.4,
         target: VDevice | None = None,
     ):
-        self.hef = HEF(str(hef_path))
+        super().__init__(hef_path, target)
         self.confidence_threshold = confidence_threshold
         self.nms_threshold = nms_threshold
-
-        self.target = target or get_vdevice()
-
-        configure_params = ConfigureParams.create_from_hef(
-            hef=self.hef, interface=HailoStreamInterface.PCIe
-        )
-        self.network_group = self.target.configure(self.hef, configure_params)[0]
-        self.network_group_params = self.network_group.create_params()
-
-        input_vstream_info = self.hef.get_input_vstream_infos()[0]
-        self.input_height = input_vstream_info.shape[0]
-        self.input_width = input_vstream_info.shape[1]
-
-        self.input_vstream_params = InputVStreamParams.make(
-            self.network_group, format_type=FormatType.UINT8
-        )
-        self.output_vstream_params = OutputVStreamParams.make(
-            self.network_group, format_type=FormatType.FLOAT32
-        )
-
         self.strides = [8, 16, 32]
         self.anchors_by_stride = self._generate_anchors()
 
@@ -97,22 +68,10 @@ class HailoFaceDetector:
         orig_h, orig_w, _ = image_rgb.shape
         logger.debug("Input Image Shape: %dx%d", orig_w, orig_h)
 
-        resized_frame = cv2.resize(
-            image_rgb, (self.input_width, self.input_height)
-        )
-        input_data = {
-            self.hef.get_input_vstream_infos()[0].name: np.expand_dims(
-                resized_frame, axis=0
-            )
-        }
+        input_data = self._prepare_input(image_rgb)
 
-        with InferVStreams(
-            self.network_group,
-            self.input_vstream_params,
-            self.output_vstream_params,
-        ) as infer_pipeline:
-            with self.network_group.activate(self.network_group_params):
-                raw_results = infer_pipeline.infer(input_data)
+        # Execute on persistent stream pipeline
+        raw_results = self._infer(input_data)
 
         logger.debug("--- Raw Tensor Output Summary ---")
         outputs_by_stride = {}
