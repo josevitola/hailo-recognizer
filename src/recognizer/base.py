@@ -16,7 +16,7 @@ from recognizer.device import get_vdevice
 
 
 class HailoModelBase:
-    """Base class for HailoRT models with persistent stream pipeline management."""
+    """Base class for HailoRT models with persistent pipeline management."""
 
     def __init__(self, hef_path: str | Path, target: VDevice | None = None):
         self.hef = HEF(str(hef_path))
@@ -42,7 +42,15 @@ class HailoModelBase:
             self.network_group, format_type=FormatType.FLOAT32
         )
 
-        # Persistent stream pipeline (stream buffers allocated once)
+        # Persistent activation and stream pipeline.
+        # The shared VDevice uses ROUND_ROBIN scheduling, so multiple
+        # network groups (detector + embedder) can stay activated
+        # simultaneously without per-inference activation overhead.
+        self._activated_network_group = self.network_group.activate(
+            self.network_group_params
+        )
+        self._activated_network_group.__enter__()
+
         self.infer_pipeline = InferVStreams(
             self.network_group,
             self.input_vstream_params,
@@ -51,15 +59,8 @@ class HailoModelBase:
         self.infer_pipeline.__enter__()
 
     def _infer(self, input_data: dict[str, np.ndarray]) -> dict:
-        """
-        Run inference on the persistent stream pipeline.
-
-        The network group is activated/deactivated around each call because
-        HailoRT only allows one activated network group per VDevice, and both
-        detector and embedder share the same VDevice singleton.
-        """
-        with self.network_group.activate(self.network_group_params):
-            return self.infer_pipeline.infer(input_data)
+        """Run inference on the persistent stream pipeline."""
+        return self.infer_pipeline.infer(input_data)
 
     def _prepare_input(self, image: np.ndarray) -> dict[str, np.ndarray]:
         """Resize image to model input dims and format as batch input."""
@@ -70,6 +71,8 @@ class HailoModelBase:
         """Cleanly close persistent Hailo stream resources."""
         if hasattr(self, "infer_pipeline"):
             self.infer_pipeline.__exit__(None, None, None)
+        if hasattr(self, "_activated_network_group"):
+            self._activated_network_group.__exit__(None, None, None)
 
     def __enter__(self):
         return self

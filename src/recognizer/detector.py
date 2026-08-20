@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 import cv2
 import numpy as np
@@ -73,21 +74,25 @@ class HailoFaceDetector(HailoModelBase):
         # Execute on persistent stream pipeline
         raw_results = self._infer(input_data)
 
-        logger.debug("--- Raw Tensor Output Summary ---")
+        debug_enabled = logger.isEnabledFor(logging.DEBUG)
+        if debug_enabled:
+            logger.debug("--- Raw Tensor Output Summary ---")
         outputs_by_stride = {}
         for name, tensor in raw_results.items():
             _, h, w, c = tensor.shape
             stride = self.input_height // h
-            min_val, max_val, mean_val = tensor.min(), tensor.max(), tensor.mean()
-            logger.debug(
-                "  - Key: '%s' | Shape: %s | Stride: %s | Range: [%.4f, %.4f] | Mean: %.4f",
-                name,
-                tensor.shape,
-                stride,
-                min_val,
-                max_val,
-                mean_val,
-            )
+
+            if debug_enabled:
+                min_val, max_val, mean_val = tensor.min(), tensor.max(), tensor.mean()
+                logger.debug(
+                    "  - Key: '%s' | Shape: %s | Stride: %s | Range: [%.4f, %.4f] | Mean: %.4f",
+                    name,
+                    tensor.shape,
+                    stride,
+                    min_val,
+                    max_val,
+                    mean_val,
+                )
 
             if stride not in outputs_by_stride:
                 outputs_by_stride[stride] = {}
@@ -111,38 +116,29 @@ class HailoFaceDetector(HailoModelBase):
                 logger.debug("  - Stride %s: Missing score or bbox tensor", stride)
                 continue
 
-            raw_scores = stride_data["score"].flatten()
-            sig_scores = self._sigmoid(raw_scores)
+            sig_scores = self._sigmoid(stride_data["score"].flatten())
 
-            top5_raw = np.sort(raw_scores)[-5:][::-1]
-            top5_sig = np.sort(sig_scores)[-5:][::-1]
-
-            logger.debug("  - Stride %s:", stride)
-            logger.debug("      Top 5 Raw Scores:      %s", np.round(top5_raw, 4))
-            logger.debug("      Top 5 Sigmoid Scores:  %s", np.round(top5_sig, 4))
-            logger.debug("      Confidence Threshold:  %s", self.confidence_threshold)
+            if debug_enabled:
+                top5_sig = np.sort(sig_scores)[-5:][::-1]
+                logger.debug("  - Stride %s:", stride)
+                logger.debug("      Top 5 Sigmoid Scores:  %s", np.round(top5_sig, 4))
+                logger.debug("      Confidence Threshold:  %s", self.confidence_threshold)
 
             bbox_outputs = stride_data["bbox"]
             anchors = self.anchors_by_stride[stride]
 
-            # Try both raw and sigmoid scores for candidates
-            boxes_sig, scores_sig = self._decode_boxes(
+            # SCRFD outputs logits; sigmoid is the correct score transform.
+            # Only decode once with sigmoid scores (no raw-score fallback).
+            boxes, scores = self._decode_boxes(
                 anchors, bbox_outputs, stride, sig_scores
             )
-            boxes_raw, scores_raw = self._decode_boxes(
-                anchors, bbox_outputs, stride, raw_scores
-            )
 
-            logger.debug("      Candidates via Sigmoid: %s", len(boxes_sig))
-            logger.debug("      Candidates via Raw:     %s", len(boxes_raw))
+            if debug_enabled:
+                logger.debug("      Candidates: %s", len(boxes))
 
-            # Prefer sigmoid if candidates exist, otherwise try raw
-            if len(boxes_sig) > 0:
-                all_boxes.append(boxes_sig)
-                all_scores.append(scores_sig)
-            elif len(boxes_raw) > 0:
-                all_boxes.append(boxes_raw)
-                all_scores.append(scores_raw)
+            if len(boxes) > 0:
+                all_boxes.append(boxes)
+                all_scores.append(scores)
 
         if not all_boxes:
             logger.debug("Result: ZERO candidates passed confidence threshold.")
@@ -150,6 +146,16 @@ class HailoFaceDetector(HailoModelBase):
 
         cat_boxes = np.vstack(all_boxes)
         cat_scores = np.concatenate(all_scores)
+
+        # Limit candidates to top-K by score before NMS.
+        # NMS is O(n^2), so processing all ~16K anchors is extremely slow.
+        # Keeping only the top 1000 candidates reduces NMS cost dramatically
+        # while preserving detection accuracy.
+        MAX_CANDIDATES = 1000
+        if len(cat_scores) > MAX_CANDIDATES:
+            top_indices = np.argsort(cat_scores)[-MAX_CANDIDATES:]
+            cat_boxes = cat_boxes[top_indices]
+            cat_scores = cat_scores[top_indices]
 
         scale_x = orig_w / self.input_width
         scale_y = orig_h / self.input_height

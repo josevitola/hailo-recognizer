@@ -10,7 +10,7 @@ DETECTOR_MODEL_PATH = Path(
 )
 
 EMBEDDER_MODEL_PATH = Path(
-    os.getenv("EMBEDDER_MODEL_PATH", PROJECT_ROOT / "models" / "arcface_mobilefacenet_8l.hef")
+    os.getenv("EMBEDDER_MODEL_PATH", PROJECT_ROOT / "models" / "arcface_mobilefacenet.hef")
 )
 
 TARGET_PROFILE_PATH = Path(
