@@ -7,7 +7,14 @@ from picamera2 import Picamera2
 from recognizer.detector import HailoFaceDetector
 from recognizer.embedder import HailoEmbedder
 from recognizer.matcher import TargetMatcher
-from recognizer.config import DETECTOR_MODEL_PATH, EMBEDDER_MODEL_PATH, TARGET_PROFILE_PATH, DETECTOR_THRESHOLD, MATCHER_THRESHOLD
+from recognizer.osc import OSCSender
+from recognizer.config import (
+    DETECTOR_MODEL_PATH,
+    EMBEDDER_MODEL_PATH,
+    TARGET_PROFILE_PATH,
+    DETECTOR_THRESHOLD,
+    MATCHER_THRESHOLD,
+)
 from recognizer.logging import get_logger, setup_logging
 
 logger = get_logger(__name__)
@@ -16,7 +23,7 @@ logger = get_logger(__name__)
 def main():
     parser = argparse.ArgumentParser(
         prog="preview",
-        description="Run the live single-subject face recognition stream.",
+        description="Run the live single-subject face recognition and OSC tracking stream.",
     )
     parser.add_argument(
         "--debug",
@@ -28,14 +35,27 @@ def main():
         action="store_true",
         help="Print per-stage timing for each frame.",
     )
+    parser.add_argument(
+        "--osc-ip",
+        type=str,
+        default="127.0.0.1",
+        help="Target IP address for OSC packets (default: 127.0.0.1 for local MVP, set to remote IP for v1).",
+    )
+    parser.add_argument(
+        "--osc-port",
+        type=int,
+        default=8000,
+        help="Target UDP port for OSC packets (default: 8000).",
+    )
     args = parser.parse_args()
 
     setup_logging(debug=args.debug)
 
-    logger.info("Loading NPU models and target profile...")
+    logger.info("Loading NPU models, target profile, and OSC sender...")
     detector = HailoFaceDetector(hef_path=DETECTOR_MODEL_PATH, confidence_threshold=DETECTOR_THRESHOLD)
     embedder = HailoEmbedder(hef_path=EMBEDDER_MODEL_PATH)
     matcher = TargetMatcher(profile_path=TARGET_PROFILE_PATH, threshold=MATCHER_THRESHOLD)
+    osc_sender = OSCSender(ip=args.osc_ip, port=args.osc_port)
 
     picam2 = Picamera2()
     # Disable the raw still stream to avoid dual-stream overhead on the IMX500.
@@ -47,7 +67,7 @@ def main():
     )
     picam2.start()
 
-    logger.info("Live recognition active. Press 'q' to quit.")
+    logger.info("Live recognition & OSC tracking active. Press 'q' to quit.")
 
     try:
         while True:
@@ -75,24 +95,14 @@ def main():
                 embedding = embedder.extract_embedding(crop)
                 is_match, similarity = matcher.match(embedding)
 
-                # 3. ONLY DRAW IF MATCHED TO TARGET
-                # if is_match:
-                #     label = f"Det: {det_score:.2f}, Match: {similarity:.2f}"
-                #     color = (0, 255, 0)  # Green
-
-                #     cv2.rectangle(frame_rgb, (x1, y1), (x2, y2), color, 2)
-                #     cv2.putText(
-                #         frame_rgb,
-                #         label,
-                #         (x1, max(y1 - 10, 20)),
-                #         cv2.FONT_HERSHEY_SIMPLEX,
-                #         0.6,
-                #         color,
-                #         2,
-                #     )
-
-                label = f"Det: {det_score:.2f}, Match: {similarity:.2f}"
-                color = (0, 255, 0) if is_match else (0, 0, 255)  # Green if match, Red if not
+                # 3. Transmit OSC target when target face is identified
+                if is_match:
+                    norm_x, norm_y = osc_sender.send_target_from_bbox(x1, y1, x2, y2, w, h)
+                    label = f"Match: {similarity:.2f} | OSC: ({norm_x:.2f}, {norm_y:.2f})"
+                    color = (0, 255, 0)
+                else:
+                    label = f"Det: {det_score:.2f}, Match: {similarity:.2f}"
+                    color = (0, 0, 255)
 
                 cv2.rectangle(frame_rgb, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(
@@ -100,7 +110,7 @@ def main():
                     label,
                     (x1, max(y1 - 10, 20)),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
+                    0.5,
                     color,
                     2,
                 )
